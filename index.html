@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>パックマン迷路ゲーム</title>
+<script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-950 text-gray-100 min-h-screen p-4 flex flex-col items-center">
+<h1 class="text-2xl font-bold text-yellow-400 mb-1">パックマン迷路ゲーム</h1>
+<div class="flex gap-6 mb-2 text-sm">
+  <span>スコア: <span id="score" class="text-yellow-300 font-bold">0</span></span>
+  <span>ハイスコア: <span id="hi" class="text-yellow-300 font-bold">0</span></span>
+  <span>残機: <span id="lives" class="text-red-400 font-bold">3</span></span>
+</div>
+<canvas id="c" width="420" height="420" aria-label="パックマンゲームフィールド" class="border border-gray-700 rounded"></canvas>
+<div id="overlay" class="hidden mt-4 text-center">
+  <p id="overlayMsg" class="text-2xl font-bold text-yellow-300 mb-3"></p>
+  <button onclick="initGame()" aria-label="ゲームを再開する" class="bg-yellow-600 hover:bg-yellow-500 text-black font-bold py-2 px-8 rounded-full">もう一度</button>
+</div>
+<p class="mt-2 text-gray-500 text-xs">矢印キーまたはWASDで移動</p>
+
+<script>
+const C = document.getElementById("c");
+const ctx = C.getContext("2d");
+const CELL = 28, COLS = 15, ROWS = 15;
+const W = COLS*CELL, H = ROWS*CELL;
+C.width = W; C.height = H;
+
+const BASE_MAP = [
+  "###############",
+  "#.....#.....#.#",  // row 1 - need to be careful about symmetry
+  "#.###.#.###.#.#",
+  "#o..#.....#..o#",
+  "#.###.###.###.#",
+  "#.............#",
+  "#.###.# #.###.#",
+  "#.....   .....#",
+  "#.###.# #.###.#",
+  "#.............#",
+  "#.###.###.###.#",
+  "#o..#.....#..o#",
+  "#.###.#.###.#.#",
+  "#.....#.....#.#",
+  "###############"
+];
+
+let map, dots, pacman, ghosts, score, lives, gameOver, paused, won, raf, scaredTimer;
+let hiScore = parseInt(localStorage.getItem("pacman_hi")||"0");
+document.getElementById("hi").textContent = hiScore;
+
+function initGame() {
+  document.getElementById("overlay").classList.add("hidden");
+  map = BASE_MAP.map(r=>r.split(""));
+  dots = 0;
+  // Count dots
+  for(let r=0;r<ROWS;r++) for(let c=0;c<COLS;c++) if(map[r][c]===".") dots++;
+  score = 0; lives = 3; gameOver = false; won = false; scaredTimer = 0;
+  pacman = {x:7,y:7,dir:{x:0,y:0},next:{x:0,y:0},anim:0,mouth:0.3};
+  ghosts = [
+    {x:6,y:6,dir:{x:1,y:0},color:"#ff3333",scared:false},
+    {x:8,y:6,dir:{x:-1,y:0},color:"#ff9933",scared:false}
+  ];
+  updateUI();
+  if(raf) cancelAnimationFrame(raf);
+  loop();
+}
+
+function updateUI() {
+  document.getElementById("score").textContent = score;
+  document.getElementById("lives").textContent = "❤".repeat(lives);
+}
+
+function canMove(x,y) {
+  if(x<0||x>=COLS||y<0||y>=ROWS) return false;
+  const c = map[y][x];
+  return c !== "#";
+}
+
+function moveEntity(e, bias) {
+  // Try preferred direction
+  let nx = e.x + e.dir.x, ny = e.y + e.dir.y;
+  if(canMove(nx,ny)) { e.x=nx; e.y=ny; return; }
+  // Pick random valid direction with bias toward pac
+  const dirs = [{x:1,y:0},{x:-1,y:0},{x:0,y:1},{x:0,y:-1}];
+  const valid = dirs.filter(d=>canMove(e.x+d.x,e.y+d.y));
+  if(!valid.length) return;
+  if(bias && Math.random()<0.5) {
+    // Bias toward pac
+    valid.sort((a,b)=>{
+      const da = Math.abs((e.x+a.x)-bias.x)+Math.abs((e.y+a.y)-bias.y);
+      const db = Math.abs((e.x+b.x)-bias.x)+Math.abs((e.y+b.y)-bias.y);
+      return da-db;
+    });
+    e.dir = valid[0];
+  } else {
+    e.dir = valid[Math.floor(Math.random()*valid.length)];
+  }
+  e.x += e.dir.x; e.y += e.dir.y;
+}
+
+let tick=0;
+function loop() {
+  tick++;
+  ctx.fillStyle="#000";
+  ctx.fillRect(0,0,W,H);
+  drawMaze();
+
+  if(tick%8===0 && !gameOver && !won) {
+    // Move pac
+    const nd = pacman.next;
+    if((nd.x||nd.y) && canMove(pacman.x+nd.x, pacman.y+nd.y)) {
+      pacman.dir = {...nd};
+    }
+    if((pacman.dir.x||pacman.dir.y) && canMove(pacman.x+pacman.dir.x, pacman.y+pacman.dir.y)) {
+      pacman.x += pacman.dir.x; pacman.y += pacman.dir.y;
+    }
+    // Eat
+    const cell = map[pacman.y][pacman.x];
+    if(cell===".") { map[pacman.y][pacman.x]=" "; score+=10; dots--; updateUI(); }
+    if(cell==="o") {
+      map[pacman.y][pacman.x]=" "; score+=50; dots--;
+      scaredTimer=50; ghosts.forEach(g=>g.scared=true); updateUI();
+    }
+    if(dots<=0) { won=true; showOverlay("クリア！"); return; }
+
+    // Move ghosts
+    ghosts.forEach(g=>{
+      moveEntity(g, g.scared ? null : pacman);
+    });
+    if(scaredTimer>0) { scaredTimer--; if(scaredTimer<=0) ghosts.forEach(g=>g.scared=false); }
+
+    // Collision
+    ghosts.forEach(g=>{
+      if(g.x===pacman.x && g.y===pacman.y) {
+        if(g.scared) { g.x=6+ghosts.indexOf(g)*2; g.y=6; score+=200; updateUI(); }
+        else { lives--; updateUI(); if(lives<=0){gameOver=true;showOverlay("ゲームオーバー"); return;} resetPositions(); }
+      }
+    });
+    pacman.mouth = (pacman.mouth>0.6||pacman.mouth<0.05) ? (pacman.mouth>0.3?0.05:0.6) : pacman.mouth + (pacman.mouth>0.3?-0.1:0.1);
+  }
+
+  drawEntities();
+  if(!gameOver && !won) raf = requestAnimationFrame(loop);
+}
+
+function resetPositions() {
+  pacman.x=7; pacman.y=7; pacman.dir={x:0,y:0}; pacman.next={x:0,y:0};
+  ghosts[0].x=6; ghosts[0].y=6; ghosts[1].x=8; ghosts[1].y=6;
+}
+
+function drawMaze() {
+  for(let r=0;r<ROWS;r++) for(let c=0;c<COLS;c++) {
+    const x=c*CELL, y=r*CELL, ch=map[r][c];
+    if(ch==="#") {
+      ctx.fillStyle="#1e40af"; ctx.fillRect(x,y,CELL,CELL);
+      ctx.strokeStyle="#3b82f6"; ctx.strokeRect(x+1,y+1,CELL-2,CELL-2);
+    } else if(ch===".") {
+      ctx.fillStyle="#fbbf24"; ctx.beginPath();
+      ctx.arc(x+CELL/2,y+CELL/2,2.5,0,Math.PI*2); ctx.fill();
+    } else if(ch==="o") {
+      ctx.fillStyle="#fbbf24"; ctx.beginPath();
+      ctx.arc(x+CELL/2,y+CELL/2,5,0,Math.PI*2); ctx.fill();
+    }
+  }
+}
+
+function drawEntities() {
+  // Ghosts
+  ghosts.forEach(g=>{
+    const x=g.x*CELL+CELL/2, y=g.y*CELL+CELL/2, r=CELL/2-2;
+    ctx.fillStyle=g.scared?"#6366f1":g.color;
+    ctx.beginPath();
+    ctx.arc(x,y-2,r,Math.PI,0);
+    ctx.lineTo(x+r,y+r);
+    for(let i=2;i>=0;i--) ctx.lineTo(x-r+(2-i)*(r*2/2),y+r-(i%2===0?0:r/2));
+    ctx.lineTo(x-r,y+r);
+    ctx.closePath(); ctx.fill();
+    // Eyes
+    if(!g.scared) {
+      ctx.fillStyle="#fff"; ctx.beginPath(); ctx.arc(x-4,y-4,3,0,Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.arc(x+4,y-4,3,0,Math.PI*2); ctx.fill();
+      ctx.fillStyle="#00f"; ctx.beginPath(); ctx.arc(x-3,y-4,1.5,0,Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.arc(x+5,y-4,1.5,0,Math.PI*2); ctx.fill();
+    }
+  });
+  // Pac-Man
+  const px=pacman.x*CELL+CELL/2, py=pacman.y*CELL+CELL/2;
+  const angle = Math.atan2(pacman.dir.y, pacman.dir.x) || 0;
+  const mouth = pacman.mouth;
+  ctx.fillStyle="#facc15";
+  ctx.beginPath();
+  ctx.moveTo(px,py);
+  ctx.arc(px,py,CELL/2-2, angle+mouth, angle+Math.PI*2-mouth);
+  ctx.closePath(); ctx.fill();
+}
+
+function showOverlay(msg) {
+  if(score>hiScore){hiScore=score;localStorage.setItem("pacman_hi",hiScore);document.getElementById("hi").textContent=hiScore;}
+  document.getElementById("overlayMsg").textContent = msg;
+  document.getElementById("overlay").classList.remove("hidden");
+}
+
+document.addEventListener("keydown", e=>{
+  const map2 = {"ArrowUp":{x:0,y:-1},"ArrowDown":{x:0,y:1},"ArrowLeft":{x:-1,y:0},"ArrowRight":{x:1,y:0},
+               "w":{x:0,y:-1},"s":{x:0,y:1},"a":{x:-1,y:0},"d":{x:1,y:0},
+               "W":{x:0,y:-1},"S":{x:0,y:1},"A":{x:-1,y:0},"D":{x:1,y:0}};
+  if(map2[e.key]) { e.preventDefault(); pacman.next = map2[e.key]; }
+});
+
+initGame();
+</script>
+</body>
+</html>
